@@ -122,7 +122,7 @@ void loop()
 				break;
 
 			default:
-				Serial.println("Unregistered macro");
+				Serial.println(F("Unregistered macro"));
 				break;
 			}
 
@@ -147,9 +147,9 @@ void loadMacros()
 	{
 		macroTypeFlag = EEPROM.read(FLAG_INDEX);
 
-		Serial.print("Flag index in EEPROM exists: ");
+		Serial.print(F("Flag index in EEPROM exists: "));
 		Serial.println(macroTypeFlag, BIN);
-		Serial.println("Loading macros...");
+		Serial.println(F("Loading macros..."));
 
 		for (size_t i = 0; i < MACRO_COUNT; i++)
 		{
@@ -172,12 +172,12 @@ void loadMacros()
 			}
 		}
 
-		Serial.println("Macros loaded successfully");
+		Serial.println(F("Macros loaded successfully"));
 	}
 	else
 	{
-		Serial.println("Flag index in EEPROM is empty.");
-		Serial.println("Initializing empty macros array...");
+		Serial.println(F("Flag index in EEPROM is empty."));
+		Serial.println(F("Initializing empty macros array..."));
 		for (size_t i = 0; i < MACRO_COUNT; i++)
 		{
 			macros[i] = nullptr;
@@ -227,7 +227,7 @@ void handleCommands(const String &buffer)
 		DeserializationError error = deserializeJson(doc, buffer);
 		if (error)
 		{
-			Serial.print("Error deserializing buffer: ");
+			Serial.print(F("Error deserializing buffer: "));
 			Serial.println(error.f_str());
 
 			return;
@@ -237,7 +237,7 @@ void handleCommands(const String &buffer)
 		const char *ev = doc["event"].as<const char *>();
 		if (strlen(ev) == 0)
 		{
-			Serial.println("Expected string of length > 0 for field `event`");
+			Serial.println(F("Expected string of length > 0 for field `event`"));
 			return;
 		}
 
@@ -252,9 +252,9 @@ void handleCommands(const String &buffer)
 		switch (ev[0])
 		{
 		case 'x':
-			Serial.println("Resetting EEPROM...");
+			Serial.println(F("Resetting EEPROM..."));
 			EEPROMUtils::reset();
-			Serial.println("EEPROM reset successfully");
+			Serial.println(F("EEPROM reset successfully"));
 			break;
 
 		case 'r':
@@ -262,9 +262,6 @@ void handleCommands(const String &buffer)
 			break;
 
 		case 'w':
-			Serial.println(F("doc contents in handle commands function:"));
-			serializeJson(doc, Serial);
-			Serial.println();
 			handleWriteCommand(doc);
 			break;
 
@@ -278,7 +275,7 @@ void handleCommands(const String &buffer)
 			*/
 
 		default:
-			Serial.println("Invalid event");
+			Serial.println(F("Invalid event"));
 			break;
 		}
 	}
