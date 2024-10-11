@@ -254,6 +254,16 @@ void handleCommands(const String &buffer)
 		case 'x':
 			Serial.println(F("Resetting EEPROM..."));
 			EEPROMUtils::reset();
+			for (size_t i = 0; i < MACRO_COUNT; i++)
+			{
+				ProgrammableMacro *ptr = macros[i];
+				if (ptr)
+				{
+					delete ptr;
+					macros[i] = nullptr;
+				}
+			}
+
 			Serial.println(F("EEPROM reset successfully"));
 			break;
 
