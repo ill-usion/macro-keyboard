@@ -282,14 +282,12 @@ void handleCommands(const String &buffer)
 			handleWriteCommand(doc);
 			break;
 
-			/*
-			case 'c':
-			{
-				size_t macroIndex = doc["macroIndex"].as<size_t>();
-				handleClearCommand(macroIndex);
-				break;
-			}
-			*/
+		case 'c':
+		{
+			size_t macroIndex = doc["macroIndex"].as<size_t>();
+			handleClearCommand(macroIndex);
+			break;
+		}
 
 		default:
 			Serial.println(F("Invalid event"));
@@ -347,8 +345,9 @@ void handleReadCommand()
 				{
 				case SequenceActionType::RELEASE_ALL:
 					break;
-				
-				case SequenceActionType::KEYSTROKE: [[fallthrough]]
+
+				case SequenceActionType::KEYSTROKE:
+				[[fallthrough]]
 				case SequenceActionType::CONSUMER_KEYSTROKE:
 					seqObj["keycode"] = (KeyboardKeycode)action.keycode;
 					break;
@@ -405,7 +404,8 @@ void handleWriteCommand(JsonDocument &doc)
 			case SequenceActionType::RELEASE_ALL:
 				break;
 
-			case SequenceActionType::KEYSTROKE: [[fallthrough]]
+			case SequenceActionType::KEYSTROKE:
+			[[fallthrough]]
 			case SequenceActionType::CONSUMER_KEYSTROKE:
 				act.keycode = obj["keycode"].as<uint16_t>();
 				break;
@@ -473,9 +473,20 @@ void handleClearCommand(size_t idx)
 		return;
 	}
 
+	if (macros[idx] == nullptr)
+	{
+		Serial.print(F("Macro in index "));
+		Serial.print(idx);
+		Serial.println(F(" is unset"));
+		return;
+	}
+
 	size_t eepromIdx = macroIndexToEEPROMIndex(idx);
 	EEPROMUtils::reset<TextMacro>(eepromIdx);
 
-	Serial.print(F("Cleared macro in index "));
-	Serial.println(idx);
+	delete macros[idx];
+	macros[idx] = nullptr;
+
+	Serial.print(F("Cleared macro "));
+	Serial.println(idx + 1);
 }
