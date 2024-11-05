@@ -16,7 +16,7 @@ namespace EEPROMUtils
     template <typename T>
     static void reset(size_t startIdx)
     {
-        for (size_t i = startIdx; i < sizeof(T); i++)
+        for (size_t i = startIdx; i < (startIdx + sizeof(T)); i++)
         {
             EEPROM.write(i, 0xFF);
         }
