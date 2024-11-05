@@ -51,8 +51,10 @@ void setup()
 		prevState[i] = HIGH;
 	}
 
-	BootKeyboard.begin();
-	BootKeyboard.releaseAll();
+	Consumer.begin();
+	Consumer.releaseAll();
+	// BootKeyboard.begin();
+	// BootKeyboard.releaseAll();
 }
 
 void loop()
@@ -127,6 +129,7 @@ void loop()
 			}
 
 			delay(KEY_DELAY);
+			Consumer.releaseAll();
 			BootKeyboard.releaseAll();
 		}
 
@@ -340,8 +343,9 @@ void handleReadCommand()
 				{
 				case SequenceActionType::RELEASE_ALL:
 					break;
-
-				case SequenceActionType::KEYSTROKE:
+				
+				case SequenceActionType::KEYSTROKE: [[fallthrough]]
+				case SequenceActionType::CONSUMER_KEYSTROKE:
 					seqObj["keycode"] = (KeyboardKeycode)action.keycode;
 					break;
 
@@ -397,8 +401,9 @@ void handleWriteCommand(JsonDocument &doc)
 			case SequenceActionType::RELEASE_ALL:
 				break;
 
-			case SequenceActionType::KEYSTROKE:
-				act.keycode = obj["keycode"].as<uint8_t>();
+			case SequenceActionType::KEYSTROKE: [[fallthrough]]
+			case SequenceActionType::CONSUMER_KEYSTROKE:
+				act.keycode = obj["keycode"].as<uint16_t>();
 				break;
 
 			case SequenceActionType::DELAY:

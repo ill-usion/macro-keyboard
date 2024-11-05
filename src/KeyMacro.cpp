@@ -30,8 +30,13 @@ void KeyMacro::execute()
             BootKeyboard.press((KeyboardKeycode)seq.keycode);
             break;
 
+        case SequenceActionType::CONSUMER_KEYSTROKE:
+            Consumer.press((ConsumerKeycode)seq.keycode);
+            break;
+
         case SequenceActionType::RELEASE_ALL:
             BootKeyboard.releaseAll();
+            Consumer.releaseAll();
             break;
         }
     }

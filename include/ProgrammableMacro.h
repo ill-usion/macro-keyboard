@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <HID-Project.h>
+#include <HID-Settings.h>
 
 enum class MacroType : uint8_t
 {

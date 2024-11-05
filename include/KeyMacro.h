@@ -8,7 +8,8 @@ public:
     {
         RELEASE_ALL = 0x00,
         KEYSTROKE = 0x01,
-        DELAY = 0x02
+        CONSUMER_KEYSTROKE = 0x02,
+        DELAY = 0x03
     };
 
     typedef struct _SequenceAction
@@ -17,7 +18,7 @@ public:
         union
         {
             uint16_t delay;
-            uint8_t keycode;
+            uint16_t keycode;
         };
     } SequenceAction;
 
