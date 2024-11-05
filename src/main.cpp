@@ -53,8 +53,9 @@ void setup()
 
 	Consumer.begin();
 	Consumer.releaseAll();
-	// BootKeyboard.begin();
-	// BootKeyboard.releaseAll();
+	
+	BootKeyboard.begin();
+	BootKeyboard.releaseAll();
 }
 
 void loop()
