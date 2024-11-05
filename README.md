@@ -47,9 +47,6 @@ For key macros:
             "sequenceType": 2, // consumer keystroke (media controls and such)
             "keycode": 233 // volume up
         },
-        {
-            "sequenceType": 0 // release all
-        }
     ]
 }
 ```
