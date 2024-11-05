@@ -17,6 +17,7 @@ const unsigned long DEBOUNCE_TIME = 50; // 50ms
 unsigned long debounceMillis = 0;
 bool prevState[ARR_SIZE(BUTTONS)];
 
+constexpr unsigned long WAIT_FOR_SERIAL_TIME = 3000; // wait 3s for serial to open
 constexpr size_t MACRO_COUNT = 3;
 constexpr size_t LARGEST_EEPROM_OBJ_SIZE = max(sizeof(TextMacro), sizeof(KeyMacro));
 uint8_t macroTypeFlag;
@@ -40,7 +41,9 @@ void setup()
 {
 	Serial.begin(115200);
 
-	while (!Serial)
+	unsigned long waitForSerialStartTime = millis();
+	// stops waiting for serial to open after the defined amount of time
+	while (!Serial && (millis() - waitForSerialStartTime) < WAIT_FOR_SERIAL_TIME)
 		;
 
 	loadMacros();
@@ -53,7 +56,7 @@ void setup()
 
 	Consumer.begin();
 	Consumer.releaseAll();
-	
+
 	BootKeyboard.begin();
 	BootKeyboard.releaseAll();
 }
