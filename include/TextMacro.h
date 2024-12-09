@@ -5,7 +5,7 @@
 class TextMacro : public ProgrammableMacro
 {
 public:
-    static const size_t TEXT_LEN = 256;
+    static const size_t TEXT_LEN = 100;
     
 private:
     char m_text[TEXT_LEN];
