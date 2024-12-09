@@ -1,9 +1,19 @@
 #include <Arduino.h>
 #include <EEPROM.h>
 #include <ArduinoJson.h>
+#include <assert.h>
 #include "KeyMacro.h"
 #include "TextMacro.h"
 #include "EEPROMUtils.h"
+
+// #define KEYBOARD_DEBUG
+#ifdef KEYBOARD_DEBUG
+#define DEBUG_PRINT Serial.print
+#define DEBUG_PRINTLN Serial.println
+#else
+#define DEBUG_PRINT
+#define DEBUG_PRINTLN
+#endif
 
 #define ARR_SIZE(a) (sizeof(a) / sizeof(a[0]))
 #define KEY_DELAY 5
@@ -11,15 +21,21 @@
 using SequenceAction = KeyMacro::SequenceAction;
 using SequenceActionType = KeyMacro::SequenceActionType;
 
-const uint8_t BUTTONS[] = {2, 3, 4, 5, 6, 7, 8, 9, 10};
-const unsigned long DEBOUNCE_TIME = 50; // 50ms
+const uint8_t BUTTONS[] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 14, 15};
+const unsigned long DEBOUNCE_TIME = 10; // 10ms
 
 unsigned long debounceMillis = 0;
 bool prevState[ARR_SIZE(BUTTONS)];
 
-constexpr unsigned long WAIT_FOR_SERIAL_TIME = 3000; // wait 3s for serial to open
-constexpr size_t MACRO_COUNT = 3;
+constexpr size_t MACRO_COUNT = 6; // number of programmable macros
 constexpr size_t LARGEST_EEPROM_OBJ_SIZE = max(sizeof(TextMacro), sizeof(KeyMacro));
+constexpr size_t USED_EEPROM_SIZE = (MACRO_COUNT * LARGEST_EEPROM_OBJ_SIZE);
+
+// reserve 1 byte for the macro flag
+static_assert(!(USED_EEPROM_SIZE - 1 > 1024), "Insufficient EEPROM memory. Try decreasing MACRO_COUNT.");
+
+constexpr unsigned long WAIT_FOR_SERIAL_TIME = 3000; // wait 3s for serial to open
+
 uint8_t macroTypeFlag;
 bool isMacroFlagEmpty = false;
 constexpr size_t FLAG_INDEX = 0;
@@ -34,6 +50,7 @@ bool isIndexEmpty(int);
 size_t macroIndexToEEPROMIndex(size_t idx);
 void handleCommands(const String &);
 void handleReadCommand();
+void handleReadCommand2(size_t);
 void handleWriteCommand(JsonDocument &);
 void handleClearCommand(size_t idx);
 
@@ -66,7 +83,7 @@ void loop()
 	if (Serial.available())
 	{
 		String buf = Serial.readStringUntil('\n');
-		Serial.println(buf);
+		DEBUG_PRINTLN(buf);
 
 		handleCommands(buf);
 	}
@@ -112,23 +129,38 @@ void loop()
 				BootKeyboard.press('s');
 				break;
 
-			case 5:
+			case 6:
 				if (macros[0] != nullptr)
 					macros[0]->execute();
 				break;
 
-			case 6:
+			case 7:
 				if (macros[1] != nullptr)
 					macros[1]->execute();
 				break;
 
-			case 7:
+			case 8:
 				if (macros[2] != nullptr)
 					macros[2]->execute();
 				break;
 
+			case 9:
+				if (macros[3] != nullptr)
+					macros[3]->execute();
+				break;
+
+			case 10:
+				if (macros[4] != nullptr)
+					macros[4]->execute();
+				break;
+
+			case 11:
+				if (macros[5] != nullptr)
+					macros[5]->execute();
+				break;
+
 			default:
-				Serial.println(F("Unregistered macro"));
+				DEBUG_PRINTLN(F("Unregistered macro"));
 				break;
 			}
 
@@ -145,18 +177,16 @@ void loop()
 
 void loadMacros()
 {
-	/*
-		basically checking if the first
-		byte is empty where the flag is stored
-	*/
+	// basically checking if the first
+	// byte is empty where the flag is stored
 	isMacroFlagEmpty = isIndexEmpty<uint8_t>(FLAG_INDEX);
 	if (!isMacroFlagEmpty)
 	{
 		macroTypeFlag = EEPROM.read(FLAG_INDEX);
 
-		Serial.print(F("Flag index in EEPROM exists: "));
-		Serial.println(macroTypeFlag, BIN);
-		Serial.println(F("Loading macros..."));
+		DEBUG_PRINT(F("Flag index in EEPROM exists: "));
+		DEBUG_PRINTLN(macroTypeFlag, BIN);
+		DEBUG_PRINTLN(F("Loading macros..."));
 
 		for (size_t i = 0; i < MACRO_COUNT; i++)
 		{
@@ -179,12 +209,12 @@ void loadMacros()
 			}
 		}
 
-		Serial.println(F("Macros loaded successfully"));
+		DEBUG_PRINTLN(F("Macros loaded successfully"));
 	}
 	else
 	{
-		Serial.println(F("Flag index in EEPROM is empty."));
-		Serial.println(F("Initializing empty macros array..."));
+		DEBUG_PRINTLN(F("Flag index in EEPROM is empty."));
+		DEBUG_PRINTLN(F("Initializing empty macros array..."));
 		for (size_t i = 0; i < MACRO_COUNT; i++)
 		{
 			macros[i] = nullptr;
@@ -252,6 +282,7 @@ void handleCommands(const String &buffer)
 			x: Reset macros
 			r: Read macros
 			w: Write macros
+			c: Reset a specific button
 
 			Allows us to easily add more
 			functionality in the future
@@ -259,7 +290,7 @@ void handleCommands(const String &buffer)
 		switch (ev[0])
 		{
 		case 'x':
-			Serial.println(F("Resetting EEPROM..."));
+			DEBUG_PRINTLN(F("Resetting EEPROM..."));
 			EEPROMUtils::reset();
 			for (size_t i = 0; i < MACRO_COUNT; i++)
 			{
@@ -271,12 +302,15 @@ void handleCommands(const String &buffer)
 				}
 			}
 
-			Serial.println(F("EEPROM reset successfully"));
+			DEBUG_PRINTLN(F("EEPROM reset successfully"));
 			break;
 
 		case 'r':
-			handleReadCommand();
+		{
+			size_t macroIndex = doc["index"].as<size_t>();
+			handleReadCommand2(macroIndex);
 			break;
+		}
 
 		case 'w':
 			handleWriteCommand(doc);
@@ -284,7 +318,7 @@ void handleCommands(const String &buffer)
 
 		case 'c':
 		{
-			size_t macroIndex = doc["macroIndex"].as<size_t>();
+			size_t macroIndex = doc["index"].as<size_t>();
 			handleClearCommand(macroIndex);
 			break;
 		}
@@ -300,12 +334,12 @@ void handleReadCommand()
 {
 	if (isMacroFlagEmpty)
 	{
-		// construct an array with null
+		// construct an array with {}
 		// elements based on the macro count
 		String ret = "[";
 		for (size_t i = 0; i < MACRO_COUNT; i++)
 		{
-			ret += "null";
+			ret += "{}";
 
 			if (i != MACRO_COUNT - 1)
 			{
@@ -330,16 +364,16 @@ void handleReadCommand()
 		if (macro->getType() == MacroType::KEY)
 		{
 			KeyMacro *keyMacro = (KeyMacro *)macro;
-			obj["macroType"] = (uint8_t)macro->getType();
+			obj["type"] = (uint8_t)macro->getType();
 
-			JsonArray seqArr = obj["macroData"].to<JsonArray>();
+			JsonArray seqArr = obj["data"].to<JsonArray>();
 			JsonObject seqObj;
 			SequenceAction *seq = keyMacro->getSequence();
 			for (size_t i = 0; i < keyMacro->getSeqLen(); i++)
 			{
 				SequenceAction action = seq[i];
 				seqObj = seqArr.add<JsonObject>();
-				seqObj["sequenceType"] = (uint8_t)action.type;
+				seqObj["sType"] = (uint8_t)action.type;
 
 				switch (action.type)
 				{
@@ -362,18 +396,85 @@ void handleReadCommand()
 		{
 			TextMacro *textMacro = (TextMacro *)macro;
 
-			obj["macroType"] = (uint8_t)textMacro->getType();
-			obj["macroData"] = textMacro->getText();
+			obj["type"] = (uint8_t)textMacro->getType();
+			obj["data"] = textMacro->getText();
 		}
 	}
 
 	serializeJson(readDoc, Serial);
+	Serial.println();
+}
+
+void handleReadCommand2(size_t macroIdx)
+{
+	if (macroIdx > (MACRO_COUNT - 1))
+	{
+		Serial.println(F("Invalid macro index"));
+		return;
+	}
+
+	ProgrammableMacro *macro = macros[macroIdx];
+	if (macro == nullptr)
+	{
+		Serial.println(F("null"));
+		return;
+	}
+
+	JsonDocument readDoc;
+	readDoc["index"] = macroIdx;
+	switch (macro->getType())
+	{
+	case MacroType::KEY:
+	{
+		KeyMacro *keyMacro = (KeyMacro *)macro;
+		readDoc["type"] = (uint8_t)macro->getType();
+
+		JsonArray seqArr = readDoc["data"].to<JsonArray>();
+		JsonObject seqObj;
+		SequenceAction *seq = keyMacro->getSequence();
+		for (size_t i = 0; i < keyMacro->getSeqLen(); i++)
+		{
+			SequenceAction action = seq[i];
+			seqObj = seqArr.add<JsonObject>();
+			seqObj["sType"] = (uint8_t)action.type;
+
+			switch (action.type)
+			{
+			case SequenceActionType::RELEASE_ALL:
+				break;
+
+			case SequenceActionType::KEYSTROKE:
+			[[fallthrough]]
+			case SequenceActionType::CONSUMER_KEYSTROKE:
+				seqObj["keycode"] = (KeyboardKeycode)action.keycode;
+				break;
+
+			case SequenceActionType::DELAY:
+				seqObj["delay"] = action.delay;
+				break;
+			}
+		}
+		break;
+	}
+
+	case MacroType::TEXT:
+	{
+		TextMacro *textMacro = (TextMacro *)macro;
+
+		readDoc["type"] = (uint8_t)textMacro->getType();
+		readDoc["data"] = textMacro->getText();
+		break;
+	}
+	}
+
+	serializeJson(readDoc, Serial);
+	Serial.println();
 }
 
 void handleWriteCommand(JsonDocument &doc)
 {
-	MacroType macroType = (MacroType)doc["macroType"].as<uint8_t>();
-	size_t macroIndex = doc["macroIndex"].as<size_t>();
+	MacroType macroType = (MacroType)doc["type"].as<uint8_t>();
+	size_t macroIndex = doc["index"].as<size_t>();
 
 	if (macroIndex > (MACRO_COUNT - 1))
 	{
@@ -383,7 +484,7 @@ void handleWriteCommand(JsonDocument &doc)
 
 	if (macroType == MacroType::KEY)
 	{
-		JsonArray macroSeq = doc["macroData"].as<JsonArray>();
+		JsonArray macroSeq = doc["data"].as<JsonArray>();
 		KeyMacro *keyMacro = (KeyMacro *)macros[macroIndex];
 
 		if (keyMacro)
@@ -397,7 +498,7 @@ void handleWriteCommand(JsonDocument &doc)
 		{
 			auto obj = *it;
 			act = {
-				.type = (SequenceActionType)obj["sequenceType"].as<uint8_t>()};
+				.type = (SequenceActionType)obj["sType"].as<uint8_t>()};
 
 			switch (act.type)
 			{
@@ -434,7 +535,7 @@ void handleWriteCommand(JsonDocument &doc)
 	}
 	else
 	{
-		String macroText = doc["macroData"].as<String>();
+		String macroText = doc["data"].as<String>();
 		TextMacro *textMacro = (TextMacro *)macros[macroIndex];
 
 		if (textMacro)
@@ -442,7 +543,7 @@ void handleWriteCommand(JsonDocument &doc)
 			delete textMacro;
 		}
 
-		size_t bufLen = TextMacro::TEXT_LEN - 1;
+		size_t bufLen = TextMacro::TEXT_LEN;
 		char bufArr[bufLen];
 		macroText.toCharArray(bufArr, bufLen);
 		textMacro = new TextMacro(bufArr);
@@ -462,21 +563,21 @@ void handleWriteCommand(JsonDocument &doc)
 		macros[macroIndex] = textMacro;
 	}
 
-	Serial.println(F("Macro added successfully"));
+	handleReadCommand2(macroIndex);
 }
 
 void handleClearCommand(size_t idx)
 {
 	if (idx > (MACRO_COUNT - 1))
 	{
-		Serial.println(F("Invalid macro index"));
+		Serial.println(F("Invalid macro"));
 		return;
 	}
 
 	if (macros[idx] == nullptr)
 	{
-		Serial.print(F("Macro in index "));
-		Serial.print(idx);
+		Serial.print(F("Macro "));
+		Serial.print(idx + 1);
 		Serial.println(F(" is unset"));
 		return;
 	}
@@ -487,6 +588,7 @@ void handleClearCommand(size_t idx)
 	delete macros[idx];
 	macros[idx] = nullptr;
 
-	Serial.print(F("Cleared macro "));
-	Serial.println(idx + 1);
+	Serial.print(F("Reset macro "));
+	Serial.print(idx + 1);
+	Serial.println(F(" successfully"));
 }
