@@ -24,30 +24,32 @@ using SequenceActionType = KeyMacro::SequenceActionType;
 const uint8_t NUM_ROWS = 3;
 const uint8_t NUM_COLUMNS = 4;
 const uint8_t BUTTONS[] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 14, 15};
-const bool PROGRAMMABLE_BUTTONS[] = {false, false, false, false, false, false, true, true, true, true, true, true};
+const bool PROGRAMMABLE_BUTTONS[] = {false, false, false, true, true, true, true, true, true, true, true, true};
 const unsigned long DEBOUNCE_TIME = 10; // 10ms
 
 unsigned long debounceMillis = 0;
 bool prevState[ARR_SIZE(BUTTONS)];
 
-constexpr size_t MACRO_COUNT = 6; // number of programmable macros
+// 16 bits data type allows for up to 15 custom macros
+// which is more than enough for a 3x4 macro keyboard
+uint16_t macroTypeFlag;
+bool isMacroFlagEmpty = false;
+constexpr size_t FLAG_INDEX = 0;
+constexpr size_t FLAG_SIZE = sizeof(macroTypeFlag);
+
+constexpr size_t MACRO_COUNT = 9; // number of programmable macros
 constexpr size_t LARGEST_EEPROM_OBJ_SIZE = max(sizeof(TextMacro), sizeof(KeyMacro));
 constexpr size_t USED_EEPROM_SIZE = (MACRO_COUNT * LARGEST_EEPROM_OBJ_SIZE);
 
 // reserve 1 byte for the macro flag
-static_assert(!(USED_EEPROM_SIZE - 1 > 1024), "Insufficient EEPROM memory. Try decreasing MACRO_COUNT.");
+static_assert(!(USED_EEPROM_SIZE - FLAG_SIZE > 1024), "Insufficient EEPROM memory. Try decreasing MACRO_COUNT.");
 
+ProgrammableMacro *macros[MACRO_COUNT];
 constexpr unsigned long WAIT_FOR_SERIAL_TIME = 3000; // wait 3s for serial to open
 
-uint8_t macroTypeFlag;
-bool isMacroFlagEmpty = false;
-constexpr size_t FLAG_INDEX = 0;
-constexpr size_t FLAG_SIZE = sizeof(macroTypeFlag);
-ProgrammableMacro *macros[MACRO_COUNT];
-
 void loadMacros();
-void toggleMacroFlagBit(uint8_t &, size_t);
-uint8_t readMacroFlagBit(uint8_t, size_t);
+void toggleMacroFlagBit(uint16_t &, size_t);
+uint16_t readMacroFlagBit(uint16_t, size_t);
 template <typename T>
 bool isIndexEmpty(int);
 size_t macroIndexToEEPROMIndex(size_t idx);
@@ -95,13 +97,13 @@ void loop()
 	if ((millis() - debounceMillis) < DEBOUNCE_TIME)
 		return;
 
-	for (size_t i = 0; i < ARR_SIZE(BUTTONS); i++)
+	for (size_t btnIdx = 0; btnIdx < ARR_SIZE(BUTTONS); btnIdx++)
 	{
-		bool currentState = digitalRead(BUTTONS[i]);
+		bool currentState = digitalRead(BUTTONS[btnIdx]);
 
-		if (prevState[i] == HIGH && currentState == LOW)
+		if (prevState[btnIdx] == HIGH && currentState == LOW)
 		{
-			switch (i)
+			switch (btnIdx)
 			{
 			case 0:
 				BootKeyboard.press(KEY_LEFT_CTRL);
@@ -118,54 +120,37 @@ void loop()
 				BootKeyboard.press(KEY_TAB);
 				break;
 
-			case 3:
-				BootKeyboard.press(KEY_LEFT_CTRL);
-				BootKeyboard.press(KEY_TILDE);
-				delay(100);
-				BootKeyboard.releaseAll();
-				BootKeyboard.print("npm run dev");
-				delay(100);
-				BootKeyboard.press(KEY_ENTER);
-				break;
-
-			case 4:
-				BootKeyboard.press(KEY_LEFT_CTRL);
-				BootKeyboard.press('s');
-				break;
-
-			case 6:
-				if (macros[0] != nullptr)
-					macros[0]->execute();
-				break;
-
-			case 7:
-				if (macros[1] != nullptr)
-					macros[1]->execute();
-				break;
-
-			case 8:
-				if (macros[2] != nullptr)
-					macros[2]->execute();
-				break;
-
-			case 9:
-				if (macros[3] != nullptr)
-					macros[3]->execute();
-				break;
-
-			case 10:
-				if (macros[4] != nullptr)
-					macros[4]->execute();
-				break;
-
-			case 11:
-				if (macros[5] != nullptr)
-					macros[5]->execute();
-				break;
-
 			default:
-				DEBUG_PRINTLN(F("Unregistered macro"));
+			{
+				if (!PROGRAMMABLE_BUTTONS[btnIdx])
+				{
+					DEBUG_PRINTLN(F("Unregistered macro"));
+					break;
+				}
+
+				size_t idxInSeq = 1;
+				for (size_t i = 0; i < ARR_SIZE(PROGRAMMABLE_BUTTONS); i++)
+				{
+					if (i == btnIdx)
+						break;
+
+					if (!PROGRAMMABLE_BUTTONS[i])
+						continue;
+
+					idxInSeq++;
+				}
+				//                 2. flip             1. calc the idx
+				size_t macroIdx = (MACRO_COUNT - 1) - (MACRO_COUNT - idxInSeq);
+
+				if (macros[macroIdx] == nullptr)
+				{
+					DEBUG_PRINTLN(F("Unassigned macro"));
+					break;
+				}
+
+				macros[macroIdx]->execute();
 				break;
+			}
 			}
 
 			delay(KEY_DELAY);
@@ -173,7 +158,7 @@ void loop()
 			BootKeyboard.releaseAll();
 		}
 
-		prevState[i] = currentState;
+		prevState[btnIdx] = currentState;
 	}
 
 	debounceMillis = millis();
@@ -183,7 +168,7 @@ void loadMacros()
 {
 	// basically checking if the first
 	// byte is empty where the flag is stored
-	isMacroFlagEmpty = isIndexEmpty<uint8_t>(FLAG_INDEX);
+	isMacroFlagEmpty = isIndexEmpty<uint16_t>(FLAG_INDEX);
 	if (!isMacroFlagEmpty)
 	{
 		macroTypeFlag = EEPROM.read(FLAG_INDEX);
@@ -199,7 +184,7 @@ void loadMacros()
 			if (isIndexEmpty<TextMacro>(objIdx))
 				continue;
 
-			if (readMacroFlagBit(macroTypeFlag, i) == (uint8_t)MacroType::KEY)
+			if (readMacroFlagBit(macroTypeFlag, i) == (uint16_t)MacroType::KEY)
 			{
 				KeyMacro *keyMacro = new KeyMacro();
 				EEPROM.get(objIdx, *keyMacro);
@@ -226,12 +211,12 @@ void loadMacros()
 	}
 }
 
-void toggleMacroFlagBit(uint8_t &flag, size_t bit)
+void toggleMacroFlagBit(uint16_t &flag, size_t bit)
 {
 	flag ^= 1 << bit;
 }
 
-uint8_t readMacroFlagBit(uint8_t flag, size_t bit)
+uint16_t readMacroFlagBit(uint16_t flag, size_t bit)
 {
 	return (flag >> bit) & 1;
 }
@@ -395,58 +380,61 @@ void handleReadAllCommand()
 		ProgrammableMacro *macro = macros[macroIdx];
 		if (macro == nullptr)
 		{
-			Serial.println(F("null"));
+			Serial.print(F("null"));
 			continue;
 		}
-
-		readDoc.clear();
-		readDoc["index"] = macroIdx;
-		switch (macro->getType())
+		else
 		{
-		case MacroType::KEY:
-		{
-			KeyMacro *keyMacro = (KeyMacro *)macro;
-			readDoc["type"] = (uint8_t)macro->getType();
 
-			JsonArray seqArr = readDoc["data"].to<JsonArray>();
-			JsonObject seqObj;
-			SequenceAction *seq = keyMacro->getSequence();
-			for (size_t i = 0; i < keyMacro->getSeqLen(); i++)
+			readDoc.clear();
+			readDoc["index"] = macroIdx;
+			switch (macro->getType())
 			{
-				SequenceAction action = seq[i];
-				seqObj = seqArr.add<JsonObject>();
-				seqObj["sType"] = (uint8_t)action.type;
+			case MacroType::KEY:
+			{
+				KeyMacro *keyMacro = (KeyMacro *)macro;
+				readDoc["type"] = (uint8_t)macro->getType();
 
-				switch (action.type)
+				JsonArray seqArr = readDoc["data"].to<JsonArray>();
+				JsonObject seqObj;
+				SequenceAction *seq = keyMacro->getSequence();
+				for (size_t i = 0; i < keyMacro->getSeqLen(); i++)
 				{
-				case SequenceActionType::RELEASE_ALL:
-					break;
+					SequenceAction action = seq[i];
+					seqObj = seqArr.add<JsonObject>();
+					seqObj["sType"] = (uint8_t)action.type;
 
-				case SequenceActionType::KEYSTROKE:
-				[[fallthrough]]
-				case SequenceActionType::CONSUMER_KEYSTROKE:
-					seqObj["keycode"] = (KeyboardKeycode)action.keycode;
-					break;
+					switch (action.type)
+					{
+					case SequenceActionType::RELEASE_ALL:
+						break;
 
-				case SequenceActionType::DELAY:
-					seqObj["delay"] = action.delay;
-					break;
+					case SequenceActionType::KEYSTROKE:
+					[[fallthrough]]
+					case SequenceActionType::CONSUMER_KEYSTROKE:
+						seqObj["keycode"] = (KeyboardKeycode)action.keycode;
+						break;
+
+					case SequenceActionType::DELAY:
+						seqObj["delay"] = action.delay;
+						break;
+					}
 				}
+				break;
 			}
-			break;
-		}
 
-		case MacroType::TEXT:
-		{
-			TextMacro *textMacro = (TextMacro *)macro;
+			case MacroType::TEXT:
+			{
+				TextMacro *textMacro = (TextMacro *)macro;
 
-			readDoc["type"] = (uint8_t)textMacro->getType();
-			readDoc["data"] = textMacro->getText();
-			break;
-		}
-		}
+				readDoc["type"] = (uint8_t)textMacro->getType();
+				readDoc["data"] = textMacro->getText();
+				break;
+			}
+			}
 
-		serializeJson(readDoc, Serial);
+			serializeJson(readDoc, Serial);
+		}
 
 		if (macroIdx < MACRO_COUNT - 1)
 		{
@@ -571,7 +559,7 @@ void handleWriteCommand(JsonDocument &doc)
 			keyMacro->addSeqAction(act);
 		}
 
-		if (readMacroFlagBit(macroTypeFlag, macroIndex) != (uint8_t)MacroType::KEY)
+		if (readMacroFlagBit(macroTypeFlag, macroIndex) != (uint16_t)MacroType::KEY)
 		{
 			toggleMacroFlagBit(macroTypeFlag, macroIndex);
 		}
@@ -600,7 +588,7 @@ void handleWriteCommand(JsonDocument &doc)
 		macroText.toCharArray(bufArr, bufLen);
 		textMacro = new TextMacro(bufArr);
 
-		if (readMacroFlagBit(macroTypeFlag, macroIndex) != (uint8_t)MacroType::TEXT)
+		if (readMacroFlagBit(macroTypeFlag, macroIndex) != (uint16_t)MacroType::TEXT)
 		{
 			toggleMacroFlagBit(macroTypeFlag, macroIndex);
 		}
