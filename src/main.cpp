@@ -21,7 +21,10 @@
 using SequenceAction = KeyMacro::SequenceAction;
 using SequenceActionType = KeyMacro::SequenceActionType;
 
+const uint8_t NUM_ROWS = 3;
+const uint8_t NUM_COLUMNS = 4;
 const uint8_t BUTTONS[] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 14, 15};
+const bool PROGRAMMABLE_BUTTONS[] = {false, false, false, false, false, false, true, true, true, true, true, true};
 const unsigned long DEBOUNCE_TIME = 10; // 10ms
 
 unsigned long debounceMillis = 0;
@@ -49,8 +52,9 @@ template <typename T>
 bool isIndexEmpty(int);
 size_t macroIndexToEEPROMIndex(size_t idx);
 void handleCommands(const String &);
-void handleReadCommand();
-void handleReadCommand2(size_t);
+void handleIdentifyCommand();
+void handleReadAllCommand();
+void handleReadCommand(size_t);
 void handleWriteCommand(JsonDocument &);
 void handleClearCommand(size_t idx);
 
@@ -279,16 +283,19 @@ void handleCommands(const String &buffer)
 		}
 
 		/*
+			i: Identify
 			x: Reset macros
 			r: Read macros
+			a: Read all macros
 			w: Write macros
 			c: Reset a specific button
-
-			Allows us to easily add more
-			functionality in the future
 		*/
 		switch (ev[0])
 		{
+		case 'i':
+			handleIdentifyCommand();
+			break;
+
 		case 'x':
 			DEBUG_PRINTLN(F("Resetting EEPROM..."));
 			EEPROMUtils::reset();
@@ -308,7 +315,13 @@ void handleCommands(const String &buffer)
 		case 'r':
 		{
 			size_t macroIndex = doc["index"].as<size_t>();
-			handleReadCommand2(macroIndex);
+			handleReadCommand(macroIndex);
+			break;
+		}
+
+		case 'a':
+		{
+			handleReadAllCommand();
 			break;
 		}
 
@@ -330,43 +343,72 @@ void handleCommands(const String &buffer)
 	}
 }
 
-void handleReadCommand()
+void handleIdentifyCommand()
+{
+	JsonDocument doc;
+	doc["rows"] = NUM_ROWS;
+	doc["cols"] = NUM_COLUMNS;
+	doc["nPins"] = ARR_SIZE(BUTTONS);
+
+	JsonArray pinsArr = doc["pins"].to<JsonArray>();
+	for (size_t i = 0; i < ARR_SIZE(BUTTONS); i++)
+	{
+		pinsArr.add(BUTTONS[i]);
+	}
+
+	JsonArray progPinsArr = doc["progPins"].to<JsonArray>();
+	for (size_t i = 0; i < ARR_SIZE(PROGRAMMABLE_BUTTONS); i++)
+	{
+		if (PROGRAMMABLE_BUTTONS[i])
+			progPinsArr.add(BUTTONS[i]);
+	}
+
+	serializeJson(doc, Serial);
+	Serial.println();
+}
+
+void handleReadAllCommand()
 {
 	if (isMacroFlagEmpty)
 	{
-		// construct an array with {}
+		// construct an array with `null`
 		// elements based on the macro count
-		String ret = "[";
+		Serial.print('[');
 		for (size_t i = 0; i < MACRO_COUNT; i++)
 		{
-			ret += "{}";
+			Serial.print("null");
 
 			if (i != MACRO_COUNT - 1)
 			{
-				ret += ", ";
+				Serial.print(',');
 			}
 		}
-		ret += "]";
-		Serial.println(ret);
+		Serial.println(']');
 
 		return;
 	}
 
+	Serial.print('[');
 	JsonDocument readDoc;
-	JsonArray dataArr = readDoc.to<JsonArray>();
-	for (size_t i = 0; i < MACRO_COUNT; i++)
+	for (size_t macroIdx = 0; macroIdx < MACRO_COUNT; macroIdx++)
 	{
-		JsonObject obj = dataArr.add<JsonObject>();
-		if (macros[i] == nullptr)
+		ProgrammableMacro *macro = macros[macroIdx];
+		if (macro == nullptr)
+		{
+			Serial.println(F("null"));
 			continue;
+		}
 
-		ProgrammableMacro *macro = macros[i];
-		if (macro->getType() == MacroType::KEY)
+		readDoc.clear();
+		readDoc["index"] = macroIdx;
+		switch (macro->getType())
+		{
+		case MacroType::KEY:
 		{
 			KeyMacro *keyMacro = (KeyMacro *)macro;
-			obj["type"] = (uint8_t)macro->getType();
+			readDoc["type"] = (uint8_t)macro->getType();
 
-			JsonArray seqArr = obj["data"].to<JsonArray>();
+			JsonArray seqArr = readDoc["data"].to<JsonArray>();
 			JsonObject seqObj;
 			SequenceAction *seq = keyMacro->getSequence();
 			for (size_t i = 0; i < keyMacro->getSeqLen(); i++)
@@ -391,21 +433,31 @@ void handleReadCommand()
 					break;
 				}
 			}
+			break;
 		}
-		else if (macro->getType() == MacroType::TEXT)
+
+		case MacroType::TEXT:
 		{
 			TextMacro *textMacro = (TextMacro *)macro;
 
-			obj["type"] = (uint8_t)textMacro->getType();
-			obj["data"] = textMacro->getText();
+			readDoc["type"] = (uint8_t)textMacro->getType();
+			readDoc["data"] = textMacro->getText();
+			break;
+		}
+		}
+
+		serializeJson(readDoc, Serial);
+
+		if (macroIdx < MACRO_COUNT - 1)
+		{
+			Serial.print(",");
 		}
 	}
 
-	serializeJson(readDoc, Serial);
-	Serial.println();
+	Serial.println("]");
 }
 
-void handleReadCommand2(size_t macroIdx)
+void handleReadCommand(size_t macroIdx)
 {
 	if (macroIdx > (MACRO_COUNT - 1))
 	{
@@ -563,7 +615,7 @@ void handleWriteCommand(JsonDocument &doc)
 		macros[macroIndex] = textMacro;
 	}
 
-	handleReadCommand2(macroIndex);
+	handleReadCommand(macroIndex);
 }
 
 void handleClearCommand(size_t idx)
