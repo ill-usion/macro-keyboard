@@ -333,14 +333,15 @@ void handleIdentifyCommand()
 	JsonDocument doc;
 	doc["rows"] = NUM_ROWS;
 	doc["cols"] = NUM_COLUMNS;
-	doc["nPins"] = ARR_SIZE(BUTTONS);
 
+	doc["nPins"] = ARR_SIZE(BUTTONS);
 	JsonArray pinsArr = doc["pins"].to<JsonArray>();
 	for (size_t i = 0; i < ARR_SIZE(BUTTONS); i++)
 	{
 		pinsArr.add(BUTTONS[i]);
 	}
 
+	doc["nProgPins"] = ARR_SIZE(PROGRAMMABLE_BUTTONS);
 	JsonArray progPinsArr = doc["progPins"].to<JsonArray>();
 	for (size_t i = 0; i < ARR_SIZE(PROGRAMMABLE_BUTTONS); i++)
 	{
