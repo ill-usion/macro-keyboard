@@ -108,7 +108,6 @@ void loop()
 			case 0:
 				BootKeyboard.press(KEY_LEFT_CTRL);
 				BootKeyboard.press('c');
-				delay(100);
 				break;
 
 			case 1:
