@@ -106,8 +106,8 @@ void loop()
 			switch (btnIdx)
 			{
 			case 0:
-				BootKeyboard.press('!');
-				// BootKeyboard.press('c');
+				BootKeyboard.press(KEY_LEFT_CTRL);
+				BootKeyboard.press('c');
 				delay(100);
 				break;
 
