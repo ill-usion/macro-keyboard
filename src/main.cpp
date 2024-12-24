@@ -106,8 +106,9 @@ void loop()
 			switch (btnIdx)
 			{
 			case 0:
-				BootKeyboard.press(KEY_LEFT_CTRL);
-				BootKeyboard.press('c');
+				BootKeyboard.press('!');
+				// BootKeyboard.press('c');
+				delay(100);
 				break;
 
 			case 1:
@@ -413,7 +414,9 @@ void handleReadAllCommand()
 					case SequenceActionType::KEYSTROKE:
 					[[fallthrough]]
 					case SequenceActionType::CONSUMER_KEYSTROKE:
-						seqObj["keycode"] = (KeyboardKeycode)action.keycode;
+					[[fallthrough]]
+					case SequenceActionType::CHARACTER_KEYSTROKE:
+						seqObj["keycode"] = (uint16_t)action.keycode;
 						break;
 
 					case SequenceActionType::DELAY:
@@ -487,7 +490,9 @@ void handleReadCommand(size_t macroIdx)
 			case SequenceActionType::KEYSTROKE:
 			[[fallthrough]]
 			case SequenceActionType::CONSUMER_KEYSTROKE:
-				seqObj["keycode"] = (KeyboardKeycode)action.keycode;
+			[[fallthrough]]
+			case SequenceActionType::CHARACTER_KEYSTROKE:
+				seqObj["keycode"] = (uint16_t)action.keycode;
 				break;
 
 			case SequenceActionType::DELAY:
@@ -549,6 +554,8 @@ void handleWriteCommand(JsonDocument &doc)
 			case SequenceActionType::KEYSTROKE:
 			[[fallthrough]]
 			case SequenceActionType::CONSUMER_KEYSTROKE:
+			[[fallthrough]]
+			case SequenceActionType::CHARACTER_KEYSTROKE:
 				act.keycode = obj["keycode"].as<uint16_t>();
 				break;
 

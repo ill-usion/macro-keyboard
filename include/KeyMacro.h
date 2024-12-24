@@ -9,7 +9,8 @@ public:
         RELEASE_ALL = 0x00,
         KEYSTROKE = 0x01,
         CONSUMER_KEYSTROKE = 0x02,
-        DELAY = 0x03
+        CHARACTER_KEYSTROKE = 0x03,
+        DELAY = 0x04
     };
 
     typedef struct _SequenceAction
@@ -23,12 +24,12 @@ public:
     } SequenceAction;
 
     KeyMacro() = default;
-    KeyMacro(SequenceAction* sequence, size_t len);
+    KeyMacro(SequenceAction *sequence, size_t len);
 
     void execute() override;
     MacroType getType() const override;
     size_t getSeqLen() const;
-    SequenceAction* getSequence() const;
+    SequenceAction *getSequence() const;
     void addSeqAction(SequenceAction action);
 
 public:
