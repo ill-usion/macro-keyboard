@@ -7,7 +7,7 @@
 #include "EEPROMUtils.h"
 #include "SerialUtils.h"
 
-#define KEYBOARD_DEBUG
+// #define KEYBOARD_DEBUG
 #ifdef KEYBOARD_DEBUG
 #define DEBUG_PRINT Serial.print
 #define DEBUG_PRINTLN Serial.println
@@ -26,9 +26,7 @@
 
 typedef struct
 {
-    uint8_t r;
-    uint8_t g;
-    uint8_t b;
+    uint8_t r, g, b;
 } RGB;
 
 enum class MacroKeyboardOperation : uint8_t
@@ -41,7 +39,9 @@ typedef MacroKeyboardOperation KbdOp;
 
 enum class MacroKeyboardCommand : uint8_t
 {
-    RESET = 0x00
+    RESET = 0x00,         // No arguments. No return.
+    SWITCH_LAYERS = 0x01, // No arguments. Returns the current layer after switching.
+    PRESS_MACRO = 0x02    // Takes macro index as a byte (uint8_t). No return.
 };
 typedef MacroKeyboardCommand KbdCmd;
 
@@ -106,7 +106,9 @@ void handleReadOp();
 void handleWriteOp();
 void handleCommand();
 void resetKeyboard();
+void handleSwitchLayerCmd();
 void setLedColor(const RGB &color);
+void transitionToColor(const RGB &start, const RGB &end, int steps, int delayMs);
 template <typename T>
 T clamp(const T &n, const T &min, const T &max);
 
@@ -268,10 +270,14 @@ void loadLedColors()
 
 void cycleLayers()
 {
+    const RGB &prevColor = layerColors[currentLayer];
     currentLayer = (currentLayer + 1) % LAYER_COUNT;
+    const RGB &currColor = layerColors[currentLayer];
+
     EEPROM.write(CURRENT_LAYER_EEPROM_IDX, currentLayer);
     loadMacros();
-    setLedColor(layerColors[currentLayer]);
+
+    transitionToColor(prevColor, currColor, 50, 5);
 }
 
 void processOperation(KbdOp op)
@@ -367,6 +373,14 @@ void handleCommand()
         resetKeyboard();
         break;
 
+    case KbdCmd::SWITCH_LAYERS:
+        handleSwitchLayerCmd();
+        break;
+
+    case KbdCmd::PRESS_MACRO:
+        // TODO
+        break;
+
     default:
         break;
     }
@@ -379,12 +393,33 @@ void resetKeyboard()
         ;
 }
 
+void handleSwitchLayerCmd()
+{
+    cycleLayers();
+    Serial.write((uint8_t)KbdRet::OK);
+    Serial.write(currentLayer);
+}
+
 void setLedColor(const RGB &color)
 {
     // Edit this according to your LED type
     analogWrite(RED_PIN, 255 - color.r);
     analogWrite(GREEN_PIN, 255 - color.g);
     analogWrite(BLUE_PIN, 255 - color.b);
+}
+
+void transitionToColor(const RGB &start, const RGB &end, int steps, int delayMs)
+{
+    for (int i = 0; i <= steps; i++)
+    {
+        RGB current;
+        current.r = start.r + (end.r - start.r) * i / steps;
+        current.g = start.g + (end.g - start.g) * i / steps;
+        current.b = start.b + (end.b - start.b) * i / steps;
+
+        setLedColor(current);
+        delay(delayMs);
+    }
 }
 
 template <typename T>
