@@ -107,6 +107,7 @@ void handleWriteOp();
 void handleCommand();
 void resetKeyboard();
 void handleSwitchLayerCmd();
+void handlePressMacroCmd();
 void setLedColor(const RGB &color);
 void transitionToColor(const RGB &start, const RGB &end, int steps, int delayMs);
 template <typename T>
@@ -378,7 +379,7 @@ void handleCommand()
         break;
 
     case KbdCmd::PRESS_MACRO:
-        // TODO
+        handlePressMacroCmd();
         break;
 
     default:
@@ -398,6 +399,21 @@ void handleSwitchLayerCmd()
     cycleLayers();
     Serial.write((uint8_t)KbdRet::OK);
     Serial.write(currentLayer);
+}
+
+void handlePressMacroCmd()
+{
+    uint8_t idx;
+    Serial.readBytes(&idx, sizeof(uint8_t));
+
+    if (idx >= MACRO_COUNT)
+    {
+        Serial.write((uint8_t)KbdRet::OUT_OF_RANGE);
+        return;
+    }
+
+    macros[idx].execute();
+    Serial.write((uint8_t)KbdRet::OK);
 }
 
 void setLedColor(const RGB &color)
