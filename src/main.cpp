@@ -413,6 +413,9 @@ void handlePressMacroCmd()
     }
 
     macros[idx].execute();
+    delay(KEY_DELAY);
+    Consumer.releaseAll();
+    BootKeyboard.releaseAll();
     Serial.write((uint8_t)KbdRet::OK);
 }
 
