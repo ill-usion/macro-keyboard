@@ -41,7 +41,7 @@ typedef MacroKeyboardOperation KbdOp;
 
 enum class MacroKeyboardCommand : uint8_t
 {
-    RESET = 0x00,         // No arguments. No return.
+    RESTART = 0x00,       // No arguments. No return.
     SWITCH_LAYERS = 0x01, // No arguments. Returns the current layer after switching.
     PRESS_MACRO = 0x02    // Takes macro index as a byte (uint8_t). No return.
 };
@@ -91,7 +91,6 @@ Total: 1019 bytes
 constexpr size_t TOTAL_EEPROM_USAGE = TOTAL_MACRO_EEPROM_SIZE + COLORS_SIZE + sizeof(uint8_t);
 static_assert(TOTAL_EEPROM_USAGE <= E2END, "Insufficient EEPROM memory.");
 
-
 // Follows the index approach when denoting a layer
 uint8_t currentLayer;
 Macro macros[MACRO_COUNT];
@@ -106,7 +105,7 @@ void processOperation(KbdOp op);
 void handleReadOp();
 void handleWriteOp();
 void handleCommand();
-void resetKeyboard();
+void restartKeyboard();
 void handleSwitchLayerCmd();
 void handlePressMacroCmd();
 void setLedColor(const Color &color);
@@ -369,8 +368,8 @@ void handleCommand()
     KbdCmd cmd = (KbdCmd)byte;
     switch (cmd)
     {
-    case KbdCmd::RESET:
-        resetKeyboard();
+    case KbdCmd::RESTART:
+        restartKeyboard();
         break;
 
     case KbdCmd::SWITCH_LAYERS:
@@ -386,11 +385,14 @@ void handleCommand()
     }
 }
 
-void resetKeyboard()
+void restartKeyboard()
 {
-    wdt_enable(WDTO_15MS);
-    while (1)
-        ;
+    // wdt_enable(WDTO_15MS);
+    // while (1)
+    //     ;
+    loadConfig();
+    loadLedColors();
+    setLedColor(layerColors[currentLayer]);
 }
 
 void handleSwitchLayerCmd()
