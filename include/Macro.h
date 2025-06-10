@@ -4,8 +4,8 @@
 #include <HID-Project.h>
 
 #define PRESS_AND_RELEASE_DELAY 50
+#define ACTION_DELAY 25
 #define NUM_ACTIONS_PER_KEY 23
-
 class Macro
 {
 private:

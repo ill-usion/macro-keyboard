@@ -2,15 +2,17 @@
 #include <EEPROM.h>
 #include <assert.h>
 #include <avr/wdt.h>
+#define FASTLED_HAS_CLOCKLESS
+#include <FastLED.h>
 #include <CRC32.h>
 #include "Macro.h"
-#include "EEPROMUtils.h"
 #include "SerialUtils.h"
 
 // #define KEYBOARD_DEBUG
 #ifdef KEYBOARD_DEBUG
 #define DEBUG_PRINT Serial.print
 #define DEBUG_PRINTLN Serial.println
+constexpr unsigned long WAIT_FOR_SERIAL_TIME = 3000; // wait 3s for serial to open
 #else
 #define DEBUG_PRINT
 #define DEBUG_PRINTLN
@@ -20,14 +22,14 @@
 #define KEY_DELAY 5
 
 // RGB led pin config
-#define RED_PIN 3
-#define GREEN_PIN 5
-#define BLUE_PIN 6
+#define NUM_LEDS 3
+#define DATA_PIN 3
+CRGB leds[NUM_LEDS];
 
 typedef struct
 {
     uint8_t r, g, b;
-} RGB;
+} Color;
 
 enum class MacroKeyboardOperation : uint8_t
 {
@@ -55,7 +57,7 @@ typedef MacroKeyboardReturnCode KbdRet;
 const uint8_t NUM_ROWS = 3;
 const uint8_t NUM_COLUMNS = 4;
 const uint8_t LAYER_SWITCH_BTN_IDX = 2;
-const uint8_t BUTTONS[] = {2, A0, 4, A1, A2, 7, 8, 9, 10, 16, 14, 15};
+const uint8_t BUTTONS[] = {2, A0, 4, 5, 6, 7, 8, 9, 10, 16, 14, 15};
 // Button at index 2 is used to switch between layers
 const bool PROGRAMMABLE_BUTTONS[] = {true, true, false, true, true, true, true, true, true, true, true, true};
 static_assert(ARR_SIZE(BUTTONS) == ARR_SIZE(PROGRAMMABLE_BUTTONS), "Lenght of `BUTTONS` and `PROGRAMMABLE_BUTTONS` do not match.");
@@ -64,37 +66,36 @@ const unsigned long DEBOUNCE_TIME = 10; // 10ms
 unsigned long debounceMillis = 0;
 bool prevState[ARR_SIZE(BUTTONS)];
 
-constexpr size_t LAYER_COUNT = 2;
-constexpr size_t MACRO_COUNT = 11; // Number of programmable macros per layer
+#define LAYER_COUNT 2
+// Number of programmable macros per layer
+#define MACRO_COUNT 11
+
 // Precompute the total EEPROM usage
 constexpr size_t TOTAL_MACRO_COUNT = MACRO_COUNT * LAYER_COUNT;
 constexpr size_t EEPROM_MACRO_SIZE = NUM_ACTIONS_PER_KEY * sizeof(uint16_t);
 constexpr size_t TOTAL_MACRO_EEPROM_SIZE = TOTAL_MACRO_COUNT * EEPROM_MACRO_SIZE;
 constexpr size_t LAYER_SIZE = TOTAL_MACRO_EEPROM_SIZE / LAYER_COUNT;
-constexpr size_t COLORS_SIZE = LAYER_COUNT * sizeof(RGB);
+constexpr size_t COLORS_SIZE = LAYER_COUNT * sizeof(Color);
 
 // Saved layer index comes right after macro data
 #define CURRENT_LAYER_EEPROM_IDX TOTAL_MACRO_EEPROM_SIZE
 /*
 EEPROM Layout:
     1012 bytes (Macro data)
-    1 byte (Current later)
+    1 byte (Current layer)
     6 bytes (Layer colors)
 
 Total: 1019 bytes
     5 bytes free
 */
 constexpr size_t TOTAL_EEPROM_USAGE = TOTAL_MACRO_EEPROM_SIZE + COLORS_SIZE + sizeof(uint8_t);
-static_assert(!(TOTAL_EEPROM_USAGE > 1024), "Insufficient EEPROM memory.");
+static_assert(TOTAL_EEPROM_USAGE <= E2END, "Insufficient EEPROM memory.");
 
-constexpr unsigned long WAIT_FOR_SERIAL_TIME = 3000; // wait 3s for serial to open
 
 // Follows the index approach when denoting a layer
-// layer 1 -> 0
-// layer 2 -> 1
 uint8_t currentLayer;
 Macro macros[MACRO_COUNT];
-RGB layerColors[LAYER_COUNT];
+Color layerColors[LAYER_COUNT];
 
 // Forward declerations
 void loadConfig();
@@ -108,30 +109,26 @@ void handleCommand();
 void resetKeyboard();
 void handleSwitchLayerCmd();
 void handlePressMacroCmd();
-void setLedColor(const RGB &color);
-void transitionToColor(const RGB &start, const RGB &end, int steps, int delayMs);
+void setLedColor(const Color &color);
+void transitionToColor(const Color &start, const Color &end, int steps, int delayMs);
 template <typename T>
 T clamp(const T &n, const T &min, const T &max);
 
 void setup()
 {
-    pinMode(RED_PIN, OUTPUT);
-    pinMode(GREEN_PIN, OUTPUT);
-    pinMode(BLUE_PIN, OUTPUT);
+    FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
+    FastLED.clear();
 
     // Initially turn off the LED
     setLedColor({0, 0, 0});
-    // digitalWrite(RED_PIN, HIGH);
-    // digitalWrite(GREEN_PIN, HIGH);
-    // digitalWrite(BLUE_PIN, HIGH);
 
     Serial.begin(9600);
-
+#ifdef KEYBOARD_DEBUG
     unsigned long waitForSerialStartTime = millis();
     // stops waiting for serial to open after the defined amount of time
     while (!Serial && (millis() - waitForSerialStartTime) < WAIT_FOR_SERIAL_TIME)
         ;
-
+#endif
     loadConfig();
     loadLedColors();
     setLedColor(layerColors[currentLayer]);
@@ -192,13 +189,15 @@ void loop()
                     break;
 
                 if (!PROGRAMMABLE_BUTTONS[i])
-                    goto UPDATE_STATE;
+                    continue;
 
                 idxInSeq++;
             }
             //                 2. flip             1. calc the idx
             size_t macroIdx = (MACRO_COUNT - 1) - (MACRO_COUNT - idxInSeq);
             macros[macroIdx].execute();
+            DEBUG_PRINT(F("Execuring macro "));
+            DEBUG_PRINTLN(macroIdx);
 
             delay(KEY_DELAY);
             Consumer.releaseAll();
@@ -247,7 +246,7 @@ void loadMacros()
             }
         }
 
-        DEBUG_PRINT("LOADING MACRO ");
+        DEBUG_PRINT(F("LOADING MACRO "));
         DEBUG_PRINT(macroIdx);
         DEBUG_PRINT(F(" with "));
         DEBUG_PRINT(actionIdx);
@@ -265,15 +264,15 @@ void loadLedColors()
     // 1 color per layer
     for (size_t i = 0; i < LAYER_COUNT; i++)
     {
-        EEPROM.get(colorsStartIdx + (i * sizeof(RGB)), layerColors[i]);
+        EEPROM.get(colorsStartIdx + (i * sizeof(Color)), layerColors[i]);
     }
 }
 
 void cycleLayers()
 {
-    const RGB &prevColor = layerColors[currentLayer];
+    const Color &prevColor = layerColors[currentLayer];
     currentLayer = (currentLayer + 1) % LAYER_COUNT;
-    const RGB &currColor = layerColors[currentLayer];
+    const Color &currColor = layerColors[currentLayer];
 
     EEPROM.write(CURRENT_LAYER_EEPROM_IDX, currentLayer);
     loadMacros();
@@ -419,19 +418,21 @@ void handlePressMacroCmd()
     Serial.write((uint8_t)KbdRet::OK);
 }
 
-void setLedColor(const RGB &color)
+void setLedColor(const Color &color)
 {
-    // Edit this according to your LED type
-    analogWrite(RED_PIN, 255 - color.r);
-    analogWrite(GREEN_PIN, 255 - color.g);
-    analogWrite(BLUE_PIN, 255 - color.b);
+    for (size_t i = 0; i < NUM_LEDS; i++)
+    {
+        leds[i].setRGB(color.r, color.g, color.b);
+    }
+
+    FastLED.show();
 }
 
-void transitionToColor(const RGB &start, const RGB &end, int steps, int delayMs)
+void transitionToColor(const Color &start, const Color &end, int steps, int delayMs)
 {
     for (int i = 0; i <= steps; i++)
     {
-        RGB current;
+        Color current;
         current.r = start.r + (end.r - start.r) * i / steps;
         current.g = start.g + (end.g - start.g) * i / steps;
         current.b = start.b + (end.b - start.b) * i / steps;

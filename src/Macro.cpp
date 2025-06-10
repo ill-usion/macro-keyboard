@@ -35,7 +35,7 @@ void Macro::execute()
             // Do nothing
             break;
         }
-        delay(100);
+        delay(ACTION_DELAY);
     }
 }
 
