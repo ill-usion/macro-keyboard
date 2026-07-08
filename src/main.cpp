@@ -1,15 +1,18 @@
 #include <Arduino.h>
 #include <EEPROM.h>
-#include <ArduinoJson.h>
 #include <assert.h>
-#include "KeyMacro.h"
-#include "TextMacro.h"
-#include "EEPROMUtils.h"
+#include <avr/wdt.h>
+#define FASTLED_HAS_CLOCKLESS
+#include <FastLED.h>
+#include <CRC32.h>
+#include "Macro.h"
+#include "SerialUtils.h"
 
 // #define KEYBOARD_DEBUG
 #ifdef KEYBOARD_DEBUG
 #define DEBUG_PRINT Serial.print
 #define DEBUG_PRINTLN Serial.println
+constexpr unsigned long WAIT_FOR_SERIAL_TIME = 3000; // wait 3s for serial to open
 #else
 #define DEBUG_PRINT
 #define DEBUG_PRINTLN
@@ -18,624 +21,432 @@
 #define ARR_SIZE(a) (sizeof(a) / sizeof(a[0]))
 #define KEY_DELAY 5
 
-using SequenceAction = KeyMacro::SequenceAction;
-using SequenceActionType = KeyMacro::SequenceActionType;
+// RGB led pin config
+#define NUM_LEDS 3
+#define DATA_PIN 3
+CRGB leds[NUM_LEDS];
+
+typedef struct
+{
+    uint8_t r, g, b;
+} Color;
+
+enum class MacroKeyboardOperation : uint8_t
+{
+    READ = 0x00,
+    WRITE = 0x01,
+    COMMAND = 0x02
+};
+typedef MacroKeyboardOperation KbdOp;
+
+enum class MacroKeyboardCommand : uint8_t
+{
+    RESTART = 0x00,       // No arguments. No return.
+    SWITCH_LAYERS = 0x01, // No arguments. Returns the current layer after switching.
+    PRESS_MACRO = 0x02    // Takes macro index as a byte (uint8_t). No return.
+};
+typedef MacroKeyboardCommand KbdCmd;
+
+enum class MacroKeyboardReturnCode : uint8_t
+{
+    OK,
+    OUT_OF_RANGE
+};
+typedef MacroKeyboardReturnCode KbdRet;
 
 const uint8_t NUM_ROWS = 3;
 const uint8_t NUM_COLUMNS = 4;
-const uint8_t BUTTONS[] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 14, 15};
-const bool PROGRAMMABLE_BUTTONS[] = {false, false, false, true, true, true, true, true, true, true, true, true};
-const unsigned long DEBOUNCE_TIME = 10; // 10ms
+const uint8_t LAYER_SWITCH_BTN_IDX = 2;
+const uint8_t BUTTONS[] = {2, A0, 4, 5, 6, 7, 8, 9, 10, 16, 14, 15};
+// Button at index 2 is used to switch between layers
+const bool PROGRAMMABLE_BUTTONS[] = {true, true, false, true, true, true, true, true, true, true, true, true};
+static_assert(ARR_SIZE(BUTTONS) == ARR_SIZE(PROGRAMMABLE_BUTTONS), "Lenght of `BUTTONS` and `PROGRAMMABLE_BUTTONS` do not match.");
 
+const unsigned long DEBOUNCE_TIME = 10; // 10ms
 unsigned long debounceMillis = 0;
 bool prevState[ARR_SIZE(BUTTONS)];
 
-// 16 bits data type allows for up to 15 custom macros
-// which is more than enough for a 3x4 macro keyboard
-uint16_t macroTypeFlag;
-bool isMacroFlagEmpty = false;
-constexpr size_t FLAG_INDEX = 0;
-constexpr size_t FLAG_SIZE = sizeof(macroTypeFlag);
+#define LAYER_COUNT 2
+// Number of programmable macros per layer
+#define MACRO_COUNT 11
 
-constexpr size_t MACRO_COUNT = 9; // number of programmable macros
-constexpr size_t LARGEST_EEPROM_OBJ_SIZE = max(sizeof(TextMacro), sizeof(KeyMacro));
-constexpr size_t USED_EEPROM_SIZE = (MACRO_COUNT * LARGEST_EEPROM_OBJ_SIZE);
+// Precompute the total EEPROM usage
+constexpr size_t TOTAL_MACRO_COUNT = MACRO_COUNT * LAYER_COUNT;
+constexpr size_t EEPROM_MACRO_SIZE = NUM_ACTIONS_PER_KEY * sizeof(uint16_t);
+constexpr size_t TOTAL_MACRO_EEPROM_SIZE = TOTAL_MACRO_COUNT * EEPROM_MACRO_SIZE;
+constexpr size_t LAYER_SIZE = TOTAL_MACRO_EEPROM_SIZE / LAYER_COUNT;
+constexpr size_t COLORS_SIZE = LAYER_COUNT * sizeof(Color);
 
-// reserve 1 byte for the macro flag
-static_assert(!(USED_EEPROM_SIZE - FLAG_SIZE > 1024), "Insufficient EEPROM memory. Try decreasing MACRO_COUNT.");
+// Saved layer index comes right after macro data
+#define CURRENT_LAYER_EEPROM_IDX TOTAL_MACRO_EEPROM_SIZE
+/*
+EEPROM Layout:
+    1012 bytes (Macro data)
+    1 byte (Current layer)
+    6 bytes (Layer colors)
 
-ProgrammableMacro *macros[MACRO_COUNT];
-constexpr unsigned long WAIT_FOR_SERIAL_TIME = 3000; // wait 3s for serial to open
+Total: 1019 bytes
+    5 bytes free
+*/
+constexpr size_t TOTAL_EEPROM_USAGE = TOTAL_MACRO_EEPROM_SIZE + COLORS_SIZE + sizeof(uint8_t);
+static_assert(TOTAL_EEPROM_USAGE <= E2END, "Insufficient EEPROM memory.");
 
+// Follows the index approach when denoting a layer
+uint8_t currentLayer;
+Macro macros[MACRO_COUNT];
+Color layerColors[LAYER_COUNT];
+
+// Forward declerations
+void loadConfig();
 void loadMacros();
-void toggleMacroFlagBit(uint16_t &, size_t);
-uint16_t readMacroFlagBit(uint16_t, size_t);
+void loadLedColors();
+void cycleLayers();
+void processOperation(KbdOp op);
+void handleReadOp();
+void handleWriteOp();
+void handleCommand();
+void restartKeyboard();
+void handleSwitchLayerCmd();
+void handlePressMacroCmd();
+void setLedColor(const Color &color);
+void transitionToColor(const Color &start, const Color &end, int steps, int delayMs);
 template <typename T>
-bool isIndexEmpty(int);
-size_t macroIndexToEEPROMIndex(size_t idx);
-void handleCommands(const String &);
-void handleIdentifyCommand();
-void handleReadAllCommand();
-void handleReadCommand(size_t);
-void handleWriteCommand(JsonDocument &);
-void handleClearCommand(size_t idx);
+T clamp(const T &n, const T &min, const T &max);
 
 void setup()
 {
-	Serial.begin(115200);
+    FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
+    FastLED.clear();
 
-	unsigned long waitForSerialStartTime = millis();
-	// stops waiting for serial to open after the defined amount of time
-	while (!Serial && (millis() - waitForSerialStartTime) < WAIT_FOR_SERIAL_TIME)
-		;
+    // Initially turn off the LED
+    setLedColor({0, 0, 0});
 
-	loadMacros();
+    Serial.begin(9600);
+#ifdef KEYBOARD_DEBUG
+    unsigned long waitForSerialStartTime = millis();
+    // stops waiting for serial to open after the defined amount of time
+    while (!Serial && (millis() - waitForSerialStartTime) < WAIT_FOR_SERIAL_TIME)
+        ;
+#endif
+    loadConfig();
+    loadLedColors();
+    setLedColor(layerColors[currentLayer]);
 
-	for (size_t i = 0; i < ARR_SIZE(BUTTONS); i++)
-	{
-		pinMode(BUTTONS[i], INPUT_PULLUP);
-		prevState[i] = HIGH;
-	}
+    for (size_t i = 0; i < ARR_SIZE(BUTTONS); i++)
+    {
+        // Configure all buttons as input pullup
+        // to eliminate the use of pullup resistors
+        pinMode(BUTTONS[i], INPUT_PULLUP);
+        prevState[i] = HIGH;
+    }
 
-	Consumer.begin();
-	Consumer.releaseAll();
+    Consumer.begin();
+    Consumer.releaseAll();
 
-	BootKeyboard.begin();
-	BootKeyboard.releaseAll();
+    BootKeyboard.begin();
+    BootKeyboard.releaseAll();
 }
 
 void loop()
 {
-	if (Serial.available())
-	{
-		String buf = Serial.readStringUntil('\n');
-		DEBUG_PRINTLN(buf);
+    if (Serial.available())
+    {
+        uint8_t byte;
+        Serial.readBytes(&byte, sizeof(uint8_t));
 
-		handleCommands(buf);
-	}
+        KbdOp op = (KbdOp)byte;
+        processOperation(op);
+    }
 
-	if ((millis() - debounceMillis) < DEBOUNCE_TIME)
-		return;
+    if ((millis() - debounceMillis) < DEBOUNCE_TIME)
+        return;
 
-	for (size_t btnIdx = 0; btnIdx < ARR_SIZE(BUTTONS); btnIdx++)
-	{
-		bool currentState = digitalRead(BUTTONS[btnIdx]);
+    for (size_t btnIdx = 0; btnIdx < ARR_SIZE(BUTTONS); btnIdx++)
+    {
+        bool currentState = digitalRead(BUTTONS[btnIdx]);
 
-		if (prevState[btnIdx] == HIGH && currentState == LOW)
-		{
-			switch (btnIdx)
-			{
-			case 0:
-				BootKeyboard.press(KEY_LEFT_CTRL);
-				BootKeyboard.press('c');
-				break;
+        if (prevState[btnIdx] == HIGH && currentState == LOW)
+        {
+            if (btnIdx == LAYER_SWITCH_BTN_IDX)
+            {
 
-			case 1:
-				BootKeyboard.press(KEY_LEFT_CTRL);
-				BootKeyboard.press('v');
-				break;
+                DEBUG_PRINTLN(F("Switching layers"));
+                cycleLayers();
+                goto UPDATE_STATE;
+            }
 
-			case 2:
-				BootKeyboard.press(KEY_LEFT_ALT);
-				BootKeyboard.press(KEY_TAB);
-				break;
+            if (!PROGRAMMABLE_BUTTONS[btnIdx])
+            {
+                DEBUG_PRINTLN(F("Unprogrammable button"));
+                goto UPDATE_STATE;
+            }
 
-			default:
-			{
-				if (!PROGRAMMABLE_BUTTONS[btnIdx])
-				{
-					DEBUG_PRINTLN(F("Unregistered macro"));
-					break;
-				}
+            size_t idxInSeq = 1;
+            for (size_t i = 0; i < ARR_SIZE(PROGRAMMABLE_BUTTONS); i++)
+            {
+                if (i == btnIdx)
+                    break;
 
-				size_t idxInSeq = 1;
-				for (size_t i = 0; i < ARR_SIZE(PROGRAMMABLE_BUTTONS); i++)
-				{
-					if (i == btnIdx)
-						break;
+                if (!PROGRAMMABLE_BUTTONS[i])
+                    continue;
 
-					if (!PROGRAMMABLE_BUTTONS[i])
-						continue;
+                idxInSeq++;
+            }
+            //                 2. flip             1. calc the idx
+            size_t macroIdx = (MACRO_COUNT - 1) - (MACRO_COUNT - idxInSeq);
+            macros[macroIdx].execute();
+            DEBUG_PRINT(F("Execuring macro "));
+            DEBUG_PRINTLN(macroIdx);
 
-					idxInSeq++;
-				}
-				//                 2. flip             1. calc the idx
-				size_t macroIdx = (MACRO_COUNT - 1) - (MACRO_COUNT - idxInSeq);
+            delay(KEY_DELAY);
+            Consumer.releaseAll();
+            BootKeyboard.releaseAll();
+        }
+    UPDATE_STATE:
+        prevState[btnIdx] = currentState;
+    }
 
-				if (macros[macroIdx] == nullptr)
-				{
-					DEBUG_PRINTLN(F("Unassigned macro"));
-					break;
-				}
+    debounceMillis = millis();
+}
 
-				macros[macroIdx]->execute();
-				break;
-			}
-			}
+void loadConfig()
+{
+    size_t currLayerIdx = CURRENT_LAYER_EEPROM_IDX;
+    currentLayer = clamp(EEPROM.read(currLayerIdx), (uint8_t)0, (uint8_t)(LAYER_COUNT - 1));
 
-			delay(KEY_DELAY);
-			Consumer.releaseAll();
-			BootKeyboard.releaseAll();
-		}
-
-		prevState[btnIdx] = currentState;
-	}
-
-	debounceMillis = millis();
+    loadMacros();
 }
 
 void loadMacros()
 {
-	// basically checking if the first
-	// byte is empty where the flag is stored
-	isMacroFlagEmpty = isIndexEmpty<uint16_t>(FLAG_INDEX);
-	if (!isMacroFlagEmpty)
-	{
-		macroTypeFlag = EEPROM.read(FLAG_INDEX);
+    Action actions[NUM_ACTIONS_PER_KEY];
+    size_t macroIdx = 0;
 
-		DEBUG_PRINT(F("Flag index in EEPROM exists: "));
-		DEBUG_PRINTLN(macroTypeFlag, BIN);
-		DEBUG_PRINTLN(F("Loading macros..."));
+    // For each macro
+    for (size_t macro = 0; macro < MACRO_COUNT; macro++)
+    {
+        size_t actionIdx = 0;
 
-		for (size_t i = 0; i < MACRO_COUNT; i++)
-		{
-			size_t objIdx = macroIndexToEEPROMIndex(i);
+        // For each action slot in the macro
+        for (size_t i = 0; i < NUM_ACTIONS_PER_KEY; i++)
+        {
+            size_t eepromIdx = (macro * NUM_ACTIONS_PER_KEY + i) * 2 + (LAYER_SIZE * currentLayer);
 
-			if (isIndexEmpty<TextMacro>(objIdx))
-				continue;
+            uint16_t packed = EEPROM.read(eepromIdx) | (EEPROM.read(eepromIdx + 1) << 8);
 
-			if (readMacroFlagBit(macroTypeFlag, i) == (uint16_t)MacroType::KEY)
-			{
-				KeyMacro *keyMacro = new KeyMacro();
-				EEPROM.get(objIdx, *keyMacro);
-				macros[i] = keyMacro;
-			}
-			else
-			{
-				TextMacro *textMacro = new TextMacro();
-				EEPROM.get(objIdx, *textMacro);
-				macros[i] = textMacro;
-			}
-		}
+            DEBUG_PRINT(F("EEPROM IDX: "));
+            DEBUG_PRINT(eepromIdx);
+            DEBUG_PRINT(F(" PACKED: "));
+            DEBUG_PRINTLN(packed, HEX);
 
-		DEBUG_PRINTLN(F("Macros loaded successfully"));
-	}
-	else
-	{
-		DEBUG_PRINTLN(F("Flag index in EEPROM is empty."));
-		DEBUG_PRINTLN(F("Initializing empty macros array..."));
-		for (size_t i = 0; i < MACRO_COUNT; i++)
-		{
-			macros[i] = nullptr;
-		}
-	}
+            if (packed != 0)
+            {
+                actions[actionIdx++] = Action(packed);
+            }
+        }
+
+        DEBUG_PRINT(F("LOADING MACRO "));
+        DEBUG_PRINT(macroIdx);
+        DEBUG_PRINT(F(" with "));
+        DEBUG_PRINT(actionIdx);
+        DEBUG_PRINTLN(F(" actions"));
+
+        macros[macroIdx++] = Macro(actions, actionIdx);
+    }
 }
 
-void toggleMacroFlagBit(uint16_t &flag, size_t bit)
+void loadLedColors()
 {
-	flag ^= 1 << bit;
+    // After layer index
+    size_t colorsStartIdx = CURRENT_LAYER_EEPROM_IDX + 1;
+
+    // 1 color per layer
+    for (size_t i = 0; i < LAYER_COUNT; i++)
+    {
+        EEPROM.get(colorsStartIdx + (i * sizeof(Color)), layerColors[i]);
+    }
 }
 
-uint16_t readMacroFlagBit(uint16_t flag, size_t bit)
+void cycleLayers()
 {
-	return (flag >> bit) & 1;
+    const Color &prevColor = layerColors[currentLayer];
+    currentLayer = (currentLayer + 1) % LAYER_COUNT;
+    const Color &currColor = layerColors[currentLayer];
+
+    EEPROM.write(CURRENT_LAYER_EEPROM_IDX, currentLayer);
+    loadMacros();
+
+    transitionToColor(prevColor, currColor, 50, 5);
+}
+
+void processOperation(KbdOp op)
+{
+    switch (op)
+    {
+    case KbdOp::READ:
+        handleReadOp();
+        break;
+
+    case KbdOp::WRITE:
+        handleWriteOp();
+        break;
+
+    case KbdOp::COMMAND:
+        handleCommand();
+        break;
+
+    default:
+        break;
+    }
+}
+
+void handleReadOp()
+{
+    uint16_t idx = read_uint16();
+    uint16_t length = read_uint16();
+
+    if (idx + length > EEPROM.length())
+    {
+        Serial.write((uint8_t)KbdRet::OUT_OF_RANGE);
+        while (Serial.available())
+            Serial.read();
+        return;
+    }
+
+    uint8_t *payload = new uint8_t[length];
+
+    for (uint16_t i = 0; i < length; i++)
+    {
+        payload[i] = EEPROM.read(idx + i);
+    }
+
+    uint32_t checksum = CRC32::calculate(payload, length);
+
+    Serial.write((uint8_t)KbdRet::OK);
+    Serial.write((uint8_t *)&checksum, sizeof(uint32_t));
+    Serial.write((uint8_t *)&length, sizeof(uint16_t));
+    Serial.write(payload, length);
+
+    delete[] payload;
+}
+
+void handleWriteOp()
+{
+    uint16_t idx = read_uint16();
+    uint16_t length = read_uint16();
+
+    if (idx + length > EEPROM.length())
+    {
+        Serial.write((uint8_t)KbdRet::OUT_OF_RANGE);
+        while (Serial.available())
+            Serial.read();
+
+        return;
+    }
+
+    uint8_t *data = new uint8_t[length];
+    Serial.readBytes(data, length);
+
+    uint32_t checksum = CRC32::calculate(data, length);
+
+    for (uint16_t i = 0; i < length; i++)
+    {
+        EEPROM.write(idx + i, data[i]);
+    }
+
+    delete[] data;
+
+    Serial.write((uint8_t)KbdRet::OK);
+    Serial.write((uint8_t *)&checksum, sizeof(uint32_t));
+}
+
+void handleCommand()
+{
+    uint8_t byte;
+    Serial.readBytes(&byte, sizeof(uint8_t));
+
+    KbdCmd cmd = (KbdCmd)byte;
+    switch (cmd)
+    {
+    case KbdCmd::RESTART:
+        restartKeyboard();
+        break;
+
+    case KbdCmd::SWITCH_LAYERS:
+        handleSwitchLayerCmd();
+        break;
+
+    case KbdCmd::PRESS_MACRO:
+        handlePressMacroCmd();
+        break;
+
+    default:
+        break;
+    }
+}
+
+void restartKeyboard()
+{
+    // wdt_enable(WDTO_15MS);
+    // while (1)
+    //     ;
+    loadConfig();
+    loadLedColors();
+    setLedColor(layerColors[currentLayer]);
+}
+
+void handleSwitchLayerCmd()
+{
+    cycleLayers();
+    Serial.write((uint8_t)KbdRet::OK);
+    Serial.write(currentLayer);
+}
+
+void handlePressMacroCmd()
+{
+    uint8_t idx;
+    Serial.readBytes(&idx, sizeof(uint8_t));
+
+    if (idx >= MACRO_COUNT)
+    {
+        Serial.write((uint8_t)KbdRet::OUT_OF_RANGE);
+        return;
+    }
+
+    macros[idx].execute();
+    delay(KEY_DELAY);
+    Consumer.releaseAll();
+    BootKeyboard.releaseAll();
+    Serial.write((uint8_t)KbdRet::OK);
+}
+
+void setLedColor(const Color &color)
+{
+    for (size_t i = 0; i < NUM_LEDS; i++)
+    {
+        leds[i].setRGB(color.r, color.g, color.b);
+    }
+
+    FastLED.show();
+}
+
+void transitionToColor(const Color &start, const Color &end, int steps, int delayMs)
+{
+    for (int i = 0; i <= steps; i++)
+    {
+        Color current;
+        current.r = start.r + (end.r - start.r) * i / steps;
+        current.g = start.g + (end.g - start.g) * i / steps;
+        current.b = start.b + (end.b - start.b) * i / steps;
+
+        setLedColor(current);
+        delay(delayMs);
+    }
 }
 
 template <typename T>
-bool isIndexEmpty(int idx)
+T clamp(const T &n, const T &min, const T &max)
 {
-	size_t len = sizeof(T);
-	for (size_t i = idx; i < (idx + len); i += 1)
-	{
-		// Factory value for EEPROM is 255 (0xFF)
-		if (EEPROM.read(i) != 0xFF)
-			return false;
-	}
-
-	return true;
-}
-
-size_t macroIndexToEEPROMIndex(size_t idx)
-{
-	return (LARGEST_EEPROM_OBJ_SIZE * idx) + FLAG_SIZE;
-}
-
-void handleCommands(const String &buffer)
-{
-	// For debug purposes
-	if (buffer.startsWith("DUMP"))
-	{
-		EEPROMUtils::dump();
-	}
-	else
-	{
-		JsonDocument doc;
-		DeserializationError error = deserializeJson(doc, buffer);
-		if (error)
-		{
-			Serial.print(F("Error deserializing buffer: "));
-			Serial.println(error.f_str());
-
-			return;
-		}
-
-		// the library doesn't allow us to convert to char for some reason
-		const char *ev = doc["event"].as<const char *>();
-		if (strlen(ev) == 0)
-		{
-			Serial.println(F("Expected string of length > 0 for field `event`"));
-			return;
-		}
-
-		/*
-			i: Identify
-			x: Reset macros
-			r: Read macros
-			a: Read all macros
-			w: Write macros
-			c: Reset a specific button
-		*/
-		switch (ev[0])
-		{
-		case 'i':
-			handleIdentifyCommand();
-			break;
-
-		case 'x':
-			DEBUG_PRINTLN(F("Resetting EEPROM..."));
-			EEPROMUtils::reset();
-			for (size_t i = 0; i < MACRO_COUNT; i++)
-			{
-				ProgrammableMacro *ptr = macros[i];
-				if (ptr)
-				{
-					delete ptr;
-					macros[i] = nullptr;
-				}
-			}
-
-			DEBUG_PRINTLN(F("EEPROM reset successfully"));
-			break;
-
-		case 'r':
-		{
-			size_t macroIndex = doc["index"].as<size_t>();
-			handleReadCommand(macroIndex);
-			break;
-		}
-
-		case 'a':
-		{
-			handleReadAllCommand();
-			break;
-		}
-
-		case 'w':
-			handleWriteCommand(doc);
-			break;
-
-		case 'c':
-		{
-			size_t macroIndex = doc["index"].as<size_t>();
-			handleClearCommand(macroIndex);
-			break;
-		}
-
-		default:
-			Serial.println(F("Invalid event"));
-			break;
-		}
-	}
-}
-
-void handleIdentifyCommand()
-{
-	JsonDocument doc;
-	doc["rows"] = NUM_ROWS;
-	doc["cols"] = NUM_COLUMNS;
-
-	doc["nPins"] = ARR_SIZE(BUTTONS);
-	JsonArray pinsArr = doc["pins"].to<JsonArray>();
-	for (size_t i = 0; i < ARR_SIZE(BUTTONS); i++)
-	{
-		pinsArr.add(BUTTONS[i]);
-	}
-
-	doc["nProgPins"] = ARR_SIZE(PROGRAMMABLE_BUTTONS);
-	JsonArray progPinsArr = doc["progPins"].to<JsonArray>();
-	for (size_t i = 0; i < ARR_SIZE(PROGRAMMABLE_BUTTONS); i++)
-	{
-		if (PROGRAMMABLE_BUTTONS[i])
-			progPinsArr.add(BUTTONS[i]);
-	}
-
-	serializeJson(doc, Serial);
-	Serial.println();
-}
-
-void handleReadAllCommand()
-{
-	if (isMacroFlagEmpty)
-	{
-		// construct an array with `null`
-		// elements based on the macro count
-		Serial.print('[');
-		for (size_t i = 0; i < MACRO_COUNT; i++)
-		{
-			Serial.print("null");
-
-			if (i != MACRO_COUNT - 1)
-			{
-				Serial.print(',');
-			}
-		}
-		Serial.println(']');
-
-		return;
-	}
-
-	Serial.print('[');
-	JsonDocument readDoc;
-	for (size_t macroIdx = 0; macroIdx < MACRO_COUNT; macroIdx++)
-	{
-		ProgrammableMacro *macro = macros[macroIdx];
-		if (macro == nullptr)
-		{
-			Serial.print(F("null"));
-			continue;
-		}
-		else
-		{
-
-			readDoc.clear();
-			readDoc["index"] = macroIdx;
-			switch (macro->getType())
-			{
-			case MacroType::KEY:
-			{
-				KeyMacro *keyMacro = (KeyMacro *)macro;
-				readDoc["type"] = (uint8_t)macro->getType();
-
-				JsonArray seqArr = readDoc["data"].to<JsonArray>();
-				JsonObject seqObj;
-				SequenceAction *seq = keyMacro->getSequence();
-				for (size_t i = 0; i < keyMacro->getSeqLen(); i++)
-				{
-					SequenceAction action = seq[i];
-					seqObj = seqArr.add<JsonObject>();
-					seqObj["sType"] = (uint8_t)action.type;
-
-					switch (action.type)
-					{
-					case SequenceActionType::RELEASE_ALL:
-						break;
-
-					case SequenceActionType::KEYSTROKE:
-					[[fallthrough]]
-					case SequenceActionType::CONSUMER_KEYSTROKE:
-					[[fallthrough]]
-					case SequenceActionType::CHARACTER_KEYSTROKE:
-						seqObj["keycode"] = (uint16_t)action.keycode;
-						break;
-
-					case SequenceActionType::DELAY:
-						seqObj["delay"] = action.delay;
-						break;
-					}
-				}
-				break;
-			}
-
-			case MacroType::TEXT:
-			{
-				TextMacro *textMacro = (TextMacro *)macro;
-
-				readDoc["type"] = (uint8_t)textMacro->getType();
-				readDoc["data"] = textMacro->getText();
-				break;
-			}
-			}
-
-			serializeJson(readDoc, Serial);
-		}
-
-		if (macroIdx < MACRO_COUNT - 1)
-		{
-			Serial.print(",");
-		}
-	}
-
-	Serial.println("]");
-}
-
-void handleReadCommand(size_t macroIdx)
-{
-	if (macroIdx > (MACRO_COUNT - 1))
-	{
-		Serial.println(F("Invalid macro index"));
-		return;
-	}
-
-	ProgrammableMacro *macro = macros[macroIdx];
-	if (macro == nullptr)
-	{
-		Serial.println(F("null"));
-		return;
-	}
-
-	JsonDocument readDoc;
-	readDoc["index"] = macroIdx;
-	switch (macro->getType())
-	{
-	case MacroType::KEY:
-	{
-		KeyMacro *keyMacro = (KeyMacro *)macro;
-		readDoc["type"] = (uint8_t)macro->getType();
-
-		JsonArray seqArr = readDoc["data"].to<JsonArray>();
-		JsonObject seqObj;
-		SequenceAction *seq = keyMacro->getSequence();
-		for (size_t i = 0; i < keyMacro->getSeqLen(); i++)
-		{
-			SequenceAction action = seq[i];
-			seqObj = seqArr.add<JsonObject>();
-			seqObj["sType"] = (uint8_t)action.type;
-
-			switch (action.type)
-			{
-			case SequenceActionType::RELEASE_ALL:
-				break;
-
-			case SequenceActionType::KEYSTROKE:
-			[[fallthrough]]
-			case SequenceActionType::CONSUMER_KEYSTROKE:
-			[[fallthrough]]
-			case SequenceActionType::CHARACTER_KEYSTROKE:
-				seqObj["keycode"] = (uint16_t)action.keycode;
-				break;
-
-			case SequenceActionType::DELAY:
-				seqObj["delay"] = action.delay;
-				break;
-			}
-		}
-		break;
-	}
-
-	case MacroType::TEXT:
-	{
-		TextMacro *textMacro = (TextMacro *)macro;
-
-		readDoc["type"] = (uint8_t)textMacro->getType();
-		readDoc["data"] = textMacro->getText();
-		break;
-	}
-	}
-
-	serializeJson(readDoc, Serial);
-	Serial.println();
-}
-
-void handleWriteCommand(JsonDocument &doc)
-{
-	MacroType macroType = (MacroType)doc["type"].as<uint8_t>();
-	size_t macroIndex = doc["index"].as<size_t>();
-
-	if (macroIndex > (MACRO_COUNT - 1))
-	{
-		Serial.println(F("Invalid macro index"));
-		return;
-	}
-
-	if (macroType == MacroType::KEY)
-	{
-		JsonArray macroSeq = doc["data"].as<JsonArray>();
-		KeyMacro *keyMacro = (KeyMacro *)macros[macroIndex];
-
-		if (keyMacro)
-		{
-			delete keyMacro;
-		}
-
-		keyMacro = new KeyMacro();
-		SequenceAction act;
-		for (auto it = macroSeq.begin(); it != macroSeq.end(); ++it)
-		{
-			auto obj = *it;
-			act = {
-				.type = (SequenceActionType)obj["sType"].as<uint8_t>()};
-
-			switch (act.type)
-			{
-			case SequenceActionType::RELEASE_ALL:
-				break;
-
-			case SequenceActionType::KEYSTROKE:
-			[[fallthrough]]
-			case SequenceActionType::CONSUMER_KEYSTROKE:
-			[[fallthrough]]
-			case SequenceActionType::CHARACTER_KEYSTROKE:
-				act.keycode = obj["keycode"].as<uint16_t>();
-				break;
-
-			case SequenceActionType::DELAY:
-				act.delay = obj["delay"].as<uint16_t>();
-				break;
-			}
-
-			keyMacro->addSeqAction(act);
-		}
-
-		if (readMacroFlagBit(macroTypeFlag, macroIndex) != (uint16_t)MacroType::KEY)
-		{
-			toggleMacroFlagBit(macroTypeFlag, macroIndex);
-		}
-
-		size_t macroEEPROMIdx = macroIndexToEEPROMIndex(macroIndex);
-
-		EEPROMUtils::reset<TextMacro>(macroEEPROMIdx);
-
-		EEPROM.put(FLAG_INDEX, macroTypeFlag);
-		EEPROM.put(macroEEPROMIdx, *keyMacro);
-
-		macros[macroIndex] = keyMacro;
-	}
-	else
-	{
-		String macroText = doc["data"].as<String>();
-		TextMacro *textMacro = (TextMacro *)macros[macroIndex];
-
-		if (textMacro)
-		{
-			delete textMacro;
-		}
-
-		size_t bufLen = TextMacro::TEXT_LEN;
-		char bufArr[bufLen];
-		macroText.toCharArray(bufArr, bufLen);
-		textMacro = new TextMacro(bufArr);
-
-		if (readMacroFlagBit(macroTypeFlag, macroIndex) != (uint16_t)MacroType::TEXT)
-		{
-			toggleMacroFlagBit(macroTypeFlag, macroIndex);
-		}
-
-		size_t macroEEPROMIdx = macroIndexToEEPROMIndex(macroIndex);
-
-		EEPROMUtils::reset<TextMacro>(macroEEPROMIdx);
-
-		EEPROM.put(FLAG_INDEX, macroTypeFlag);
-		EEPROM.put(macroEEPROMIdx, *textMacro);
-
-		macros[macroIndex] = textMacro;
-	}
-
-	handleReadCommand(macroIndex);
-}
-
-void handleClearCommand(size_t idx)
-{
-	if (idx > (MACRO_COUNT - 1))
-	{
-		Serial.println(F("Invalid macro"));
-		return;
-	}
-
-	if (macros[idx] == nullptr)
-	{
-		Serial.print(F("Macro "));
-		Serial.print(idx + 1);
-		Serial.println(F(" is unset"));
-		return;
-	}
-
-	size_t eepromIdx = macroIndexToEEPROMIndex(idx);
-	EEPROMUtils::reset<TextMacro>(eepromIdx);
-
-	delete macros[idx];
-	macros[idx] = nullptr;
-
-	Serial.print(F("Reset macro "));
-	Serial.print(idx + 1);
-	Serial.println(F(" successfully"));
+    return n <= min ? min : n >= max ? max
+                                     : n;
 }
